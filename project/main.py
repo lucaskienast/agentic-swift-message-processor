@@ -213,7 +213,7 @@ class SWIFTProcessingSystem:
             # validated_messages = self.process_with_evaluator_optimizer(messages)
             #
             # YOUR CODE HERE (remove the pass statement):
-            pass
+            validated_messages = self.process_with_evaluator_optimizer(messages)
 
             # TODO 2: Call parallelization process (5 points)
             # INSTRUCTIONS:
