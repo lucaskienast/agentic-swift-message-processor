@@ -6,9 +6,12 @@ breaks down work into tasks that are executed by generic workers.
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Any
 from openai import OpenAI
 from config import Config
+from agents.workflow_agents.base_agents import BaseAgent
 
 
 class OrchestratorWorkerPattern:
@@ -20,8 +23,10 @@ class OrchestratorWorkerPattern:
     def __init__(self):
         """Initialize the orchestrator-worker pattern."""
         self.config = Config()
-        self.client = OpenAI()
-        self.model = "gpt-4o"
+        # The nested Orchestrator/GenericAgent use BaseAgent's LLMService;
+        # these attributes keep the scaffold's interface, configured from Config
+        self.client = OpenAI(api_key=self.config.OPENAI_API_KEY or None)
+        self.model = self.config.OPENAI_MODEL
 
     # TODO 15: Create orchestrator (15 points)
     # INSTRUCTIONS:
@@ -54,60 +59,94 @@ class OrchestratorWorkerPattern:
     #   - Print/return results
 
     # YOUR CODE STARTS HERE
+    #
+    # Design: the orchestrator (LLM) proposes a GROUPING PLAN - by currency,
+    # sender bank or receiver bank - and plans one report task per group.
+    # Code then builds the groups and their figures deterministically and
+    # validates the plan, so a message can never be dropped, duplicated or
+    # mis-assigned by the model. Generic workers (LLM, run in parallel)
+    # format one report per group according to the plan.
 
-    class Orchestrator:
+    TASK_TYPES = ("compliance_check", "fraud_analysis", "amount_verification",
+                  "pattern_detection", "summary_report")
+    PRIORITIES = ("high", "medium", "low")
+    GROUPING_DIMENSIONS = ("currency", "sender_bank", "receiver_bank")
+    DEFAULT_DIMENSION = "currency"
+
+    @staticmethod
+    def group_key(message: Dict, dimension: str) -> str:
+        """
+        Return the group a message belongs to for a grouping dimension.
+
+        Banks are identified by the first 8 BIC characters (institution,
+        country and location), so branches of one bank share a group.
+        """
+        if dimension == "currency":
+            parts = str(message.get("amount", "")).split()
+            return parts[-1].upper() if len(parts) > 1 else "UNKNOWN"
+        side = "sender" if dimension == "sender_bank" else "receiver"
+        bic = str(message.get(f"{side}_bic", "")).replace(" ", "").upper()
+        return bic[:8] or "UNKNOWN"
+
+    @classmethod
+    def group_messages(cls, messages: List[Dict], dimension: str) -> Dict[str, List[Dict]]:
+        """Split messages into groups for one dimension (sorted by group key)."""
+        groups: Dict[str, List[Dict]] = {}
+        for message in messages:
+            groups.setdefault(cls.group_key(message, dimension), []).append(message)
+        return dict(sorted(groups.items()))
+
+    @staticmethod
+    def group_figures(group: List[Dict]) -> Dict:
+        """
+        Compute a group's key figures in code (LLM arithmetic is unreliable).
+
+        Returns:
+            Message count, totals per currency, fraud and decision counts.
+        """
+        totals: Dict[str, Decimal] = {}
+        for message in group:
+            parts = str(message.get("amount", "")).split()
+            try:
+                value, currency = Decimal(parts[0]), parts[-1].upper()
+            except (IndexError, InvalidOperation):
+                continue
+            totals[currency] = totals.get(currency, Decimal("0")) + value
+        decisions: Dict[str, int] = {}
+        for message in group:
+            decision = message.get("fraud_decision") or "NOT_REVIEWED"
+            decisions[decision] = decisions.get(decision, 0) + 1
+        return {
+            "message_count": len(group),
+            "totals": {c: f"{v:,.2f}" for c, v in sorted(totals.items())},
+            "fraudulent_count": sum(1 for m in group if m.get("fraud_status") == "FRAUDULENT"),
+            "chain_decisions": decisions,
+        }
+
+    @staticmethod
+    def compact_message(message: Dict) -> Dict:
+        """Keep only the fields a report needs, to keep worker prompts small."""
+        fields = ("message_id", "message_type", "amount", "sender_bic", "receiver_bic",
+                  "remittance_info", "fraud_status", "fraud_score", "fraud_reasons",
+                  "fraud_decision", "fraud_justification")
+        return {field: message.get(field) for field in fields if message.get(field) is not None}
+
+    class Orchestrator(BaseAgent):
         """
         Orchestrator that analyzes messages and creates tasks for workers.
 
-        HINT: This class should use the LLM to analyze messages and determine
-        what tasks need to be performed.
+        It asks the LLM for a grouping plan (which dimension to group the
+        batch by, and why) plus one report task per group, then validates
+        that plan against the groups computed in code.
         """
 
         def __init__(self):
-            """Initialize the Orchestrator."""
-            # Initialize OpenAI client
-            # Set up any configuration needed
-            pass
-
-        def analyze_and_create_tasks(self, messages: List[Dict]) -> Dict:
-            """
-            Analyze messages and create tasks for workers.
-
-            Args:
-                messages: List of SWIFT messages to analyze
-
-            Returns:
-                Dictionary containing analysis and list of tasks
-
-            HINT: Create a prompt that asks the LLM to:
-            1. Analyze the batch of messages
-            2. Identify what processing tasks are needed
-            3. Return a structured list of tasks
-
-            Example task structure:
-            {
-                "analysis": "Summary of the message batch",
-                "tasks": [
-                    {
-                        "task_id": "task_001",
-                        "type": "compliance_check",
-                        "description": "Check sender BIC against sanctions list",
-                        "priority": "high",
-                        "data": {...}
-                    },
-                    {
-                        "task_id": "task_002",
-                        "type": "amount_analysis",
-                        "description": "Analyze transaction amounts for patterns",
-                        "priority": "medium",
-                        "data": {...}
-                    }
-                ]
-            }
-            """
-            # Create system prompt for orchestrator
-            system_prompt = """You are an Orchestrator for SWIFT transaction processing.
-            Analyze the provided messages and create specific tasks for workers.
+            """Initialize the Orchestrator with its planning persona."""
+            super().__init__(
+                system_prompt="""You are an Orchestrator for SWIFT transaction processing.
+            Analyze the batch and propose a GROUPING PLAN for the reports: choose the
+            grouping dimension that gives the most useful reports for operations and
+            compliance teams, then create one report task per group.
 
             Task types you can create:
             - compliance_check: Check for regulatory compliance
@@ -116,47 +155,191 @@ class OrchestratorWorkerPattern:
             - pattern_detection: Detect unusual patterns
             - summary_report: Create summary reports
 
-            Return JSON with your analysis and a list of specific tasks."""
+            Prefer fraud_analysis (high priority) for groups containing FRAUDULENT
+            messages or REJECT decisions. Return JSON only.""",
+                temperature=0.1
+            )
 
-            # Create user prompt with messages
-            user_prompt = f"""Analyze these SWIFT messages and create processing tasks:
+        def create_prompt(self, data: Dict) -> str:
+            """
+            Build the planning prompt.
 
-            {json.dumps(messages, indent=2)}
+            Args:
+                data: {"messages": compact messages, "previews": group sizes per dimension}
+
+            Returns:
+                The user prompt asking for the grouping plan and tasks.
+            """
+            return f"""Analyze these SWIFT messages and propose a grouping plan with report tasks.
+
+            Messages:
+            {json.dumps(data['messages'], indent=2)}
+
+            Candidate groupings (group key -> number of messages), computed from the data:
+            {json.dumps(data['previews'], indent=2)}
+
+            Choose ONE dimension from: {', '.join(OrchestratorWorkerPattern.GROUPING_DIMENSIONS)}.
+            Create exactly one task per group of the chosen dimension, using the group
+            keys exactly as listed above.
 
             Return JSON with structure:
             {{
                 "analysis": "Your analysis of the message batch",
-                "task_count": number,
+                "grouping": {{"dimension": "currency|sender_bank|receiver_bank", "rationale": "why"}},
                 "tasks": [
                     {{
-                        "task_id": "unique_id",
+                        "group_key": "<a group key of the chosen dimension>",
                         "type": "task_type",
-                        "description": "What needs to be done",
-                        "priority": "high|medium|low",
-                        "data": "relevant data for the task"
+                        "description": "What the report for this group must cover",
+                        "priority": "high|medium|low"
                     }}
                 ]
             }}"""
 
-            # TODO: Call the LLM and return the response
-            # Use self.client.chat.completions.create()
-            # Don't forget response_format={"type": "json_object"}
+        def analyze_and_create_tasks(self, messages: List[Dict]) -> Dict:
+            """
+            Analyze messages and create one validated report task per group.
 
-            return {}  # Replace with actual implementation
+            Args:
+                messages: List of SWIFT messages to analyze
 
-    class GenericAgent:
+            Returns:
+                Dictionary with analysis, grouping plan, task_count and tasks.
+                Each task's data holds the group's messages and code-computed figures.
+            """
+            pattern = OrchestratorWorkerPattern
+            previews = {
+                dimension: {key: len(group) for key, group in pattern.group_messages(messages, dimension).items()}
+                for dimension in pattern.GROUPING_DIMENSIONS
+            }
+            response = self.respond(self.create_prompt({
+                "messages": [pattern.compact_message(m) for m in messages],
+                "previews": previews,
+            }))
+            return self._validate_plan(response, messages)
+
+        def _validate_plan(self, response: Dict, messages: List[Dict]) -> Dict:
+            """
+            Turn the LLM's plan into executable tasks, repairing it where needed.
+
+            - Unknown dimension or LLM failure: fall back to grouping by currency.
+            - Tasks for unknown or duplicate groups are dropped.
+            - Groups without a task get a default summary_report task.
+            - Invalid task types / priorities are replaced with safe defaults.
+            """
+            pattern = OrchestratorWorkerPattern
+            notes = []
+            if "error" in response:
+                notes.append(f"Orchestrator LLM failed ({response['error']}); default plan used")
+            grouping = response.get("grouping") or {}
+            dimension = grouping.get("dimension")
+            rationale = grouping.get("rationale", "")
+            if dimension not in pattern.GROUPING_DIMENSIONS:
+                notes.append(f"Invalid dimension {dimension!r}; grouped by {pattern.DEFAULT_DIMENSION}")
+                dimension, rationale = pattern.DEFAULT_DIMENSION, "Default grouping"
+            groups = pattern.group_messages(messages, dimension)
+
+            planned = {}
+            for task in response.get("tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                key = str(task.get("group_key", ""))
+                if key not in groups:
+                    notes.append(f"Dropped task for unknown group {key!r}")
+                elif key in planned:
+                    notes.append(f"Dropped duplicate task for group {key!r}")
+                else:
+                    planned[key] = task
+            for key in groups:
+                if key not in planned:
+                    notes.append(f"Added default task for unplanned group {key!r}")
+                    planned[key] = {"type": "summary_report", "priority": "medium",
+                                    "description": f"Summary report for {dimension} group {key}"}
+
+            tasks = []
+            for index, key in enumerate(groups, start=1):
+                task = planned[key]
+                task_type = task.get("type") if task.get("type") in pattern.TASK_TYPES else "summary_report"
+                priority = task.get("priority") if task.get("priority") in pattern.PRIORITIES else "medium"
+                tasks.append({
+                    "task_id": f"task_{index:03d}",
+                    "type": task_type,
+                    "description": task.get("description") or f"Report for {dimension} group {key}",
+                    "priority": priority,
+                    "group_key": key,
+                    "data": {
+                        "dimension": dimension,
+                        "group_key": key,
+                        "figures": pattern.group_figures(groups[key]),
+                        "messages": [pattern.compact_message(m) for m in groups[key]],
+                    },
+                })
+            # High-priority reports first
+            tasks.sort(key=lambda t: pattern.PRIORITIES.index(t["priority"]))
+            return {
+                "analysis": response.get("analysis", "No analysis available"),
+                "grouping": {"dimension": dimension, "rationale": rationale},
+                "task_count": len(tasks),
+                "tasks": tasks,
+                "plan_notes": notes,
+            }
+
+    class GenericAgent(BaseAgent):
         """
         Generic worker agent that executes tasks assigned by the orchestrator.
 
-        HINT: This agent should be able to handle different task types
-        and execute them accordingly.
+        Each task is one group of the grouping plan; the worker adopts the
+        persona for the task type and formats a structured report for it.
         """
+
+        SYSTEM_PROMPTS = {
+            "compliance_check": """You are a Compliance Specialist.
+                Execute the compliance check as described.""",
+            "fraud_analysis": """You are a Fraud Analyst.
+                Perform detailed fraud analysis as requested.""",
+            "amount_verification": """You are a Financial Auditor.
+                Verify and analyze the amounts as specified.""",
+            "pattern_detection": """You are a Pattern Analysis Expert.
+                Detect and report unusual patterns.""",
+            "summary_report": """You are a Report Generator.
+                Create the requested summary report.""",
+        }
+        GROUNDING = """
+                Use only the data provided. The figures (counts, totals) are precomputed
+                and correct: quote them, never recompute them. fraud_status, fraud_reasons
+                and fraud_decision come from earlier verified pipeline stages.
+                Return JSON only."""
 
         def __init__(self):
             """Initialize the Generic Agent."""
-            # Initialize OpenAI client
-            # Set up any configuration needed
-            pass
+            super().__init__(system_prompt=self.SYSTEM_PROMPTS["summary_report"], temperature=0.2)
+
+        def create_prompt(self, data: Dict) -> str:
+            """
+            Build the report-formatting prompt for one task.
+
+            Args:
+                data: The task (type, description, group data).
+
+            Returns:
+                The user prompt with the required report format.
+            """
+            task_data = data.get('data', {})
+            return f"""Execute this task:
+            Type: {data.get('type', 'unknown')}
+            Description: {data.get('description', '')}
+            Data: {json.dumps(task_data, indent=2)}
+
+            Format the report for this group as JSON:
+            {{
+                "title": "Short report title naming the group",
+                "summary": "2-3 sentence overview of the group",
+                "findings": ["specific finding citing message ids or figures"],
+                "flagged_messages": [{{"message_id": "...", "reason": "..."}}],
+                "recommendation": "Concrete next step for the operations/compliance team"
+            }}
+            flagged_messages lists only messages with fraud findings or a HOLD/REJECT
+            decision; use [] if there are none."""
 
         def execute_task(self, task: Dict) -> Dict:
             """
@@ -166,50 +349,44 @@ class OrchestratorWorkerPattern:
                 task: Task dictionary with type, description, and data
 
             Returns:
-                Dictionary with task results
-
-            HINT: Based on the task type, create appropriate prompts
-            and execute the task using the LLM.
+                Dictionary with task id, status and the formatted report.
             """
             task_type = task.get('type', 'unknown')
-            description = task.get('description', '')
-            task_data = task.get('data', {})
-
-            # Create prompts based on task type
-            if task_type == 'compliance_check':
-                system_prompt = """You are a Compliance Specialist.
-                Execute the compliance check as described."""
-            elif task_type == 'fraud_analysis':
-                system_prompt = """You are a Fraud Analyst.
-                Perform detailed fraud analysis as requested."""
-            elif task_type == 'amount_verification':
-                system_prompt = """You are a Financial Auditor.
-                Verify and analyze the amounts as specified."""
-            elif task_type == 'pattern_detection':
-                system_prompt = """You are a Pattern Analysis Expert.
-                Detect and report unusual patterns."""
-            elif task_type == 'summary_report':
-                system_prompt = """You are a Report Generator.
-                Create the requested summary report."""
-            else:
-                system_prompt = """You are a Generic Processing Agent.
-                Complete the assigned task."""
-
-            user_prompt = f"""Execute this task:
-            Type: {task_type}
-            Description: {description}
-            Data: {json.dumps(task_data, indent=2)}
-
-            Return your results in JSON format."""
-
-            # TODO: Call the LLM and return the response
-            # Use appropriate error handling
-
+            system_prompt = self.SYSTEM_PROMPTS.get(
+                task_type, """You are a Generic Processing Agent.
+                Complete the assigned task.""") + self.GROUNDING
+            report = self._complete_json(system_prompt, self.create_prompt(task))
+            failed = "error" in report
             return {
                 "task_id": task.get('task_id'),
-                "status": "completed",
-                "results": "Task execution results here"
+                "type": task_type,
+                "priority": task.get('priority'),
+                "group_key": task.get('group_key'),
+                "figures": task.get('data', {}).get('figures', {}),
+                "status": "failed" if failed else "completed",
+                "report": report,
             }
+
+    @staticmethod
+    def print_report(result: Dict, dimension: str) -> None:
+        """Print one worker report; key figures come from code, not the LLM."""
+        report, figures = result.get("report", {}), result.get("figures", {})
+        print(f"\n--- {result['task_id']} [{result['priority']}] {result['type']} | "
+              f"{dimension}: {result['group_key']} ({result['status']}) ---")
+        if result["status"] != "completed":
+            print(f"  Report failed: {report.get('error')}")
+            return
+        totals = ", ".join(f"{c} {v}" for c, v in figures.get("totals", {}).items())
+        print(f"  {report.get('title', '')}")
+        print(f"  Figures: {figures.get('message_count', 0)} messages | {totals} | "
+              f"{figures.get('fraudulent_count', 0)} fraudulent | decisions {figures.get('chain_decisions', {})}")
+        print(f"  Summary: {report.get('summary', '')}")
+        for finding in report.get("findings", []):
+            print(f"    - {finding}")
+        for flagged in report.get("flagged_messages", []):
+            if isinstance(flagged, dict):
+                print(f"  ! {flagged.get('message_id')}: {flagged.get('reason')}")
+        print(f"  Recommendation: {report.get('recommendation', '')}")
 
     # YOUR CODE ENDS HERE
 
@@ -236,42 +413,43 @@ class OrchestratorWorkerPattern:
         print("ORCHESTRATOR-WORKER PATTERN PROCESSING")
         print("=" * 60)
 
-        # Example structure (replace with your implementation):
-        """
-        # Step 1: Create orchestrator
+        if not messages:
+            print("No messages to report on.")
+            return {'orchestrator_analysis': {}, 'task_results': [], 'summary': "No messages to process"}
+
+        # Step 1-2: Orchestrator proposes the grouping plan and tasks
         orchestrator = self.Orchestrator()
+        print(f"Orchestrator analyzing {len(messages)} messages...")
+        plan = orchestrator.analyze_and_create_tasks(messages)
+        dimension = plan['grouping']['dimension']
+        print(f"Orchestrator Analysis: {plan['analysis']}")
+        print(f"Grouping plan: by {dimension} - {plan['grouping']['rationale']}")
+        for note in plan['plan_notes']:
+            print(f"  Plan check: {note}")
+        print(f"Tasks created: {plan['task_count']}")
+        for task in plan['tasks']:
+            print(f"  {task['task_id']} [{task['priority']}] {task['type']:<20} "
+                  f"{dimension}={task['group_key']} ({task['data']['figures']['message_count']} messages)")
 
-        # Step 2: Get tasks from orchestrator
-        print("Orchestrator analyzing messages...")
-        orchestrator_response = orchestrator.analyze_and_create_tasks(messages)
+        # Step 3-4: Generic workers format one report per group, in parallel
+        tasks = plan['tasks']
+        print(f"\nExecuting {len(tasks)} tasks with generic workers...")
+        with ThreadPoolExecutor(max_workers=min(self.config.MAX_WORKERS, len(tasks))) as executor:
+            results = list(executor.map(lambda task: self.GenericAgent().execute_task(task), tasks))
 
-        print(f"Orchestrator Analysis: {orchestrator_response.get('analysis', 'No analysis')}")
-        print(f"Tasks created: {orchestrator_response.get('task_count', 0)}")
+        # Step 5-6: Print the reports and a summary
+        for result in results:
+            self.print_report(result, dimension)
+        completed = sum(1 for r in results if r['status'] == 'completed')
+        summary = (f"Processed {len(tasks)} tasks for {len(messages)} messages grouped by {dimension}: "
+                   f"{completed} reports completed, {len(tasks) - completed} failed")
+        print(f"\n{summary}")
 
-        # Step 3: Create generic agent(s)
-        agent = self.GenericAgent()
-
-        # Step 4: Execute tasks
-        results = []
-        tasks = orchestrator_response.get('tasks', [])
-
-        for task in tasks:
-            print(f"Executing task: {task.get('task_id')} - {task.get('description')}")
-            result = agent.execute_task(task)
-            results.append(result)
-            print(f"Task {task.get('task_id')} completed")
-
-        # Step 5: Return results
         return {
-            'orchestrator_analysis': orchestrator_response,
+            'orchestrator_analysis': plan,
             'task_results': results,
-            'summary': f"Processed {len(tasks)} tasks for {len(messages)} messages"
+            'summary': summary
         }
-        """
-
-        # YOUR IMPLEMENTATION HERE
-        # Remove the pass statement and implement the method
-        pass
 
     def test_orchestrator(self):
         """
@@ -326,10 +504,17 @@ class TestHelper:
     def test_orchestrator_only():
         """Test just the Orchestrator class."""
         print("Testing Orchestrator in isolation...")
-        # Create an instance of the Orchestrator
-        # Test with sample messages
-        # Print the tasks it creates
-        pass
+        sample_messages = [
+            {'message_id': 'MSG001', 'message_type': 'MT103', 'amount': '75000.00 USD',
+             'sender_bic': 'CHASUS33XXX', 'receiver_bic': 'DEUTDEFFXXX'},
+            {'message_id': 'MSG002', 'message_type': 'MT202', 'amount': '1000000.00 EUR',
+             'sender_bic': 'BNPAFRPPXXX', 'receiver_bic': 'BARCGB22XXX'},
+        ]
+        plan = OrchestratorWorkerPattern.Orchestrator().analyze_and_create_tasks(sample_messages)
+        print(f"Grouping: {plan['grouping']}")
+        for task in plan['tasks']:
+            print(f"  {task['task_id']} [{task['priority']}] {task['type']} -> {task['group_key']}")
+        return plan
 
     @staticmethod
     def test_generic_agent_only():
@@ -341,10 +526,9 @@ class TestHelper:
             'description': 'Check if sender BIC is valid',
             'data': {'sender_bic': 'CHASUS33XXX'}
         }
-        # Create an instance of GenericAgent
-        # Execute the sample task
-        # Print the results
-        pass
+        result = OrchestratorWorkerPattern.GenericAgent().execute_task(sample_task)
+        print(json.dumps(result, indent=2))
+        return result
 
 
 if __name__ == "__main__":
