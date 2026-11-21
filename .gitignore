@@ -16,5 +16,5 @@ project/swift_messages/
 project/data/
 
 # IDE / OS
-.idea/workspace.xml
+.idea/
 .DS_Store
