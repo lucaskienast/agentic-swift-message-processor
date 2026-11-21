@@ -351,7 +351,8 @@ class FraudPatternDetectionAgent:
             fraud_reasons.append("Same sender and receiver BIC")
 
         # Check remittance info for suspicious keywords
-        remittance = message.get('remittance_info', '').lower()
+        # MT202 messages carry remittance_info=None, so fall back to ''
+        remittance = (message.get('remittance_info') or '').lower()
         for keyword in self.suspicious_keywords:
             if keyword in remittance:
                 risk_score += 0.2
