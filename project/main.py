@@ -282,7 +282,7 @@ class SWIFTProcessingSystem:
             # chain_results = self.process_with_prompt_chaining(processed_messages)
             #
             # YOUR CODE HERE (remove the pass statement):
-            pass
+            chain_results = self.process_with_prompt_chaining(processed_messages)
 
             # TODO 4: Pass results to orchestrator (5 points)
             # INSTRUCTIONS:
