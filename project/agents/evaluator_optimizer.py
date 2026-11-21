@@ -68,7 +68,8 @@ class EvaluatorOptimizerPattern:
         # Validate reference length
         reference = message.get("reference", "")
         if len(reference) > self.SWIFT_STANDARDS["max_reference_length"]:
-            errors.append(f"Reference too long: {len(reference)} chars (max {self.SWIFT_STANDARDS['max_reference_length']})")
+            errors.append(
+                f"Reference too long: {len(reference)} chars (max {self.SWIFT_STANDARDS['max_reference_length']})")
 
         # Validate amount
         try:

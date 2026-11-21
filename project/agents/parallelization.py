@@ -234,6 +234,7 @@ class CustomFraudAgent:
     """
 
     def __init__(self):
+        """Set the template agent's risk threshold."""
         # Initialize any rules or thresholds your agent needs
         self.threshold = 0.5
 

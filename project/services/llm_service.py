@@ -16,28 +16,29 @@ class LLMService:
     """
     Service for LLM-based fraud analysis and SWIFT message correction
     """
-    
+
     def __init__(self):
+        """Create the OpenAI client from Config (key loaded from project/.env)."""
         self.logger = logging.getLogger(__name__)
         self.config = Config()
-        
+
         # Initialize OpenAI client
         # the newest OpenAI model is "gpt-4o" which was released May 13, 2024.
         # do not change this unless explicitly requested by the user
         self.client = OpenAI(api_key=self.config.OPENAI_API_KEY)
         self.model = self.config.OPENAI_MODEL
-        
+
         self.logger.info(f"LLM Service initialized with model: {self.model}")
-    
-    def review_suspicious_transaction(self, message: SWIFTMessage, fraud_score: float, 
-                                    indicators: List[str]) -> Dict[str, Any]:
+
+    def review_suspicious_transaction(self, message: SWIFTMessage, fraud_score: float,
+                                      indicators: List[str]) -> Dict[str, Any]:
         """
         Use LLM to review suspicious transactions and make hold/approve decisions
         """
-        
+
         try:
             prompt = self._create_fraud_review_prompt(message, fraud_score, indicators)
-            
+
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -49,20 +50,20 @@ class LLMService:
                         "Respond with JSON in the specified format."
                     },
                     {
-                        "role": "user", 
+                        "role": "user",
                         "content": prompt
                     }
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.1  # Low temperature for consistent analysis
             )
-            
+
             result = json.loads(response.choices[0].message.content or "{}")
-            
+
             self.logger.debug(f"LLM fraud review completed for {message.message_id}: {result['decision']}")
-            
+
             return result
-            
+
         except Exception as e:
             self.logger.error(f"LLM fraud review failed for {message.message_id}: {str(e)}")
             # Return conservative hold decision on error
@@ -73,7 +74,7 @@ class LLMService:
                 "risk_factors": indicators,
                 "recommended_actions": ["Manual review required due to system error"]
             }
-    
+
     def get_swift_correction(self, prompt: str) -> Dict[str, Any]:
         """
         Get SWIFT message corrections from LLM
@@ -97,23 +98,23 @@ class LLMService:
                 response_format={"type": "json_object"},
                 temperature=0.1
             )
-            
+
             result = json.loads(response.choices[0].message.content or "{}")
-            
+
             return result
-            
+
         except Exception as e:
             self.logger.error(f"LLM SWIFT correction failed: {str(e)}")
             return {}
-    
-    def analyze_benford_deviation(self, amounts: List[float], deviation_score: float, 
-                                p_value: float) -> Dict[str, Any]:
+
+    def analyze_benford_deviation(self, amounts: List[float], deviation_score: float,
+                                  p_value: float) -> Dict[str, Any]:
         """
         Use LLM to analyze Benford's Law deviations and provide insights
         """
         try:
             prompt = self._create_benford_analysis_prompt(amounts, deviation_score, p_value)
-            
+
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -132,13 +133,13 @@ class LLMService:
                 response_format={"type": "json_object"},
                 temperature=0.1
             )
-            
+
             result = json.loads(response.choices[0].message.content or "{}")
-            
+
             self.logger.debug("LLM Benford's Law analysis completed")
-            
+
             return result
-            
+
         except Exception as e:
             self.logger.error(f"LLM Benford analysis failed: {str(e)}")
             return {
@@ -146,9 +147,9 @@ class LLMService:
                 "significance": "UNKNOWN",
                 "recommendations": ["Manual review required"]
             }
-    
-    def _create_fraud_review_prompt(self, message: SWIFTMessage, fraud_score: float, 
-                                  indicators: List[str]) -> str:
+
+    def _create_fraud_review_prompt(self, message: SWIFTMessage, fraud_score: float,
+                                    indicators: List[str]) -> str:
         """
         Create prompt for LLM fraud review
         """
@@ -193,9 +194,9 @@ Decision Guidelines:
 - REJECT: High risk, block transaction
 """
         return prompt
-    
-    def _create_benford_analysis_prompt(self, amounts: List[float], deviation_score: float, 
-                                      p_value: float) -> str:
+
+    def _create_benford_analysis_prompt(self, amounts: List[float], deviation_score: float,
+                                        p_value: float) -> str:
         """
         Create prompt for Benford's Law analysis
         """
@@ -205,7 +206,7 @@ Decision Guidelines:
             amount_str = str(int(amount)).lstrip('0')
             if amount_str and amount_str[0].isdigit():
                 first_digits.append(int(amount_str[0]))
-        
+
         prompt = f"""
 Analyze the following transaction data for Benford's Law compliance:
 
@@ -244,7 +245,7 @@ Respond with JSON in this exact format:
 }}
 """
         return prompt
-    
+
     def batch_analyze_transactions(self, messages: List[SWIFTMessage]) -> Dict[str, Any]:
         """
         Perform batch analysis of multiple transactions for patterns
@@ -254,7 +255,7 @@ Respond with JSON in this exact format:
             amounts = [float(msg.amount) for msg in messages]
             currencies = [msg.currency for msg in messages]
             bics = [(msg.sender_bic, msg.receiver_bic) for msg in messages]
-            
+
             prompt = f"""
 Analyze this batch of {len(messages)} SWIFT transactions for suspicious patterns:
 
@@ -267,19 +268,19 @@ SUMMARY STATISTICS:
 
 SAMPLE TRANSACTIONS:
 {chr(10).join([
-    f"- {msg.message_type} {msg.amount} {msg.currency} {msg.sender_bic}->{msg.receiver_bic}"
-    for msg in messages[:10]
-])}
+                f"- {msg.message_type} {msg.amount} {msg.currency} {msg.sender_bic}->{msg.receiver_bic}"
+                for msg in messages[:10]
+            ])}
 
 Look for patterns that might indicate:
 - Systematic fraud
-- Money laundering schemes  
+- Money laundering schemes
 - Structuring activities
 - Coordination between entities
 
 Respond with JSON format analysis of suspicious patterns found.
 """
-            
+
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -296,13 +297,13 @@ Respond with JSON format analysis of suspicious patterns found.
                 response_format={"type": "json_object"},
                 temperature=0.1
             )
-            
+
             result = json.loads(response.choices[0].message.content or "{}")
-            
+
             self.logger.info("LLM batch analysis completed")
-            
+
             return result
-            
+
         except Exception as e:
             self.logger.error(f"LLM batch analysis failed: {str(e)}")
             return {

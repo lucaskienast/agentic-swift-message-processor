@@ -25,6 +25,7 @@ class SWIFTProcessingSystem:
     """Main system orchestrating all agent patterns for SWIFT processing"""
 
     def __init__(self):
+        """Create the message generator and the four agent patterns."""
         self.config = Config()
         self.swift_generator = SWIFTGenerator()
 

@@ -115,6 +115,7 @@ class SwiftCorrectionAgent:
     """Agent for correcting SWIFT messages based on validation errors."""
 
     def __init__(self):
+        """Set up the shared LLM service used for corrections."""
         # TODO 7: Define LLMService (5 points)
         # INSTRUCTIONS: Initialize self.llm_service with an instance of LLMService
         # HINT: from services.llm_service import LLMService
@@ -242,6 +243,7 @@ class SwiftCorrectionAgent:
             The corrected message with protected fields restored.
         """
         def numeric_amount(amount: Any) -> float:
+            """Numeric value of an amount such as '1234.56 USD'."""
             token = str(amount).split()[0] if str(amount).split() else ""
             return float("".join(c for c in token if c.isdigit() or c == "."))
 
@@ -266,6 +268,7 @@ class FraudAmountDetectionAgent:
     """Agent for detecting fraud based on transaction amounts."""
 
     def __init__(self):
+        """Define the amount-based risk rules."""
         self.rules = [
             {"condition": "amount > 10000", "risk_score": 0.3},
             {"condition": "round_amount", "risk_score": 0.2},
@@ -320,6 +323,7 @@ class FraudPatternDetectionAgent:
     """Agent for detecting fraud based on transaction patterns."""
 
     def __init__(self):
+        """Define high-risk BIC patterns and suspicious remittance keywords."""
         self.high_risk_patterns = ['TEST', 'FAKE', 'DEMO', '999', '000000']
         self.suspicious_keywords = ['urgent', 'immediately', 'secret', 'confidential']
 
@@ -535,6 +539,7 @@ class FraudAggAgent:
     """Agent for aggregating fraud detection results from multiple agents."""
 
     def __init__(self):
+        """Set the average-risk threshold and the decisive single-agent threshold."""
         self.threshold = 0.5  # Fraud threshold (50%)
         # A single agent this sure of fraud (e.g. a sanctioned country) is
         # decisive on its own; averaging would let clean scores from the
@@ -601,6 +606,7 @@ if __name__ == "__main__":
         """Minimal concrete BaseAgent used to exercise the LLM round trip."""
 
         def __init__(self):
+            """Configure the BIC decoding persona."""
             super().__init__(
                 system_prompt="You are a SWIFT reference-data expert. Respond in JSON."
             )
