@@ -293,7 +293,7 @@ class SWIFTProcessingSystem:
             # self.process_with_orchestrator_worker(processed_messages)
             #
             # YOUR CODE HERE (remove the pass statement):
-            pass
+            self.process_with_orchestrator_worker(processed_messages)
 
             print("\n" + "=" * 60)
             print("PROCESSING COMPLETE")
