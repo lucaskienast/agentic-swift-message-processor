@@ -120,7 +120,8 @@ class SwiftCorrectionAgent:
         # HINT: from services.llm_service import LLMService
         # Then: self.llm_service = LLMService()
 
-        pass  # Remove this pass after adding your code
+        # Shared OpenAI client + model name (API key loaded from .env via Config)
+        self.llm_service = LLMService()
 
     def create_prompt(self, message, errors):
         """
@@ -160,15 +161,12 @@ class SwiftCorrectionAgent:
         Returns:
             dict: The corrected message data
         """
-        import json
-        from openai import OpenAI
-
         system_prompt, user_prompt = self.create_prompt(message, errors)
 
         try:
-            client = OpenAI()
-            response = client.chat.completions.create(
-                model="gpt-4o",
+            # Use the LLMService from TODO 7 instead of an ad-hoc client
+            response = self.llm_service.client.chat.completions.create(
+                model=self.llm_service.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
