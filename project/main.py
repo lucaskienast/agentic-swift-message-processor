@@ -6,6 +6,7 @@ This is the main integration point where all agent patterns work together
 to process SWIFT messages through a complete pipeline.
 """
 
+import random
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -47,7 +48,42 @@ class SWIFTProcessingSystem:
             count=self.config.MESSAGE_COUNT,
             bank_count=self.config.BANK_COUNT
         )
-        return [self._to_pipeline_dict(message) for message in swift_messages]
+        messages = [self._to_pipeline_dict(message) for message in swift_messages]
+        self._inject_format_defects(messages, self.config.MALFORMED_MESSAGE_COUNT)
+        return messages
+
+    @staticmethod
+    def _inject_format_defects(messages: List[Dict], count: int) -> None:
+        """
+        Introduce deliberate, fixable format errors into a few messages.
+
+        Real SWIFT traffic contains malformed messages, but the generator only
+        produces valid ones. Each defect below violates a rule checked by the
+        Evaluator-Optimizer and can be repaired without guessing business data:
+        - long_reference: reference exceeds the 16-character SWIFT limit
+        - lowercase_currency: currency code in the amount is not uppercase
+        - spaced_bic: sender BIC typed in its human-readable grouped form
+          ("AAAA BB CC DDD"), which is not a valid 8/11-character BIC
+
+        Defects that would force the LLM to guess data (e.g. a truncated
+        BIC) are avoided, because a guessed counterparty BIC is unacceptable.
+        The defect is only logged, not stored on the message, so the
+        correction agent has to work it out from the validation errors.
+        """
+        defects = ["long_reference", "lowercase_currency", "spaced_bic"]
+        targets = random.sample(messages, min(count, len(messages)))
+
+        for index, message in enumerate(targets):
+            defect = defects[index % len(defects)]
+            if defect == "long_reference":
+                message["reference"] = f"{message['reference']}-EXTRA-REF-DATA"
+            elif defect == "lowercase_currency":
+                value, currency = message["amount"].split()
+                message["amount"] = f"{value} {currency.lower()}"
+            else:
+                bic = message["sender_bic"]
+                message["sender_bic"] = f"{bic[:4]} {bic[4:6]} {bic[6:8]} {bic[8:]}".strip()
+            print(f"  Injected defect '{defect}' into message {message['message_id']}")
 
     @staticmethod
     def _to_pipeline_dict(message: SWIFTMessage) -> Dict:
@@ -57,11 +93,14 @@ class SWIFTProcessingSystem:
         - mode="json" turns datetimes into ISO strings so the LLM-based
           patterns can json.dumps() the messages into their prompts.
         - The agents read the currency from the amount field
-          (e.g. "1234.56 USD"), so the currency code is appended to it.
-          The separate 'currency' field is kept for reporting.
+          (e.g. "1234.56 USD"), so the currency code is appended to it and
+          the separate 'currency' key is dropped. Keeping both gives the LLM
+          two sources of truth, and corrections could move the currency out
+          of the amount where the evaluator no longer finds it.
         """
         data = message.model_dump(mode="json")
-        data["amount"] = f"{message.amount} {message.currency}"
+        currency = data.pop("currency")
+        data["amount"] = f"{message.amount} {currency}"
         return data
 
     def process_with_evaluator_optimizer(self, messages: List[Dict]) -> List[Dict]:

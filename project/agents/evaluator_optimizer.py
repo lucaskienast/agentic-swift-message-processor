@@ -37,7 +37,11 @@ class EvaluatorOptimizerPattern:
                 "sender_bic", "receiver_bic"
             ],
             "valid_message_types": ["MT103", "MT202"],
-            "valid_currencies": ["USD", "EUR", "GBP", "JPY", "CHF"]
+            # Includes every currency the SWIFTGenerator can emit
+            "valid_currencies": [
+                "USD", "EUR", "GBP", "JPY", "CHF",
+                "CAD", "AUD", "SGD", "HKD"
+            ]
         }
 
     def evaluate_message(self, message: Dict) -> Tuple[bool, List[str]]:

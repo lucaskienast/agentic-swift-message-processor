@@ -19,6 +19,9 @@ class Config:
     # System settings
     MESSAGE_COUNT = 10
     BANK_COUNT = 5
+    # Number of generated messages that get a deliberate, fixable format
+    # defect so the Evaluator-Optimizer has something to correct
+    MALFORMED_MESSAGE_COUNT = 3
 
     # Processing settings
     MAX_WORKERS = 8
