@@ -169,9 +169,15 @@ class ParallelizationPattern:
                 #     message['fraud_reasons'] = []
 
                 # YOUR CODE HERE - Aggregate results and mark messages
-
-                # For now, just store the raw results (remove after implementing TODO 12)
-                message['fraud_analysis'] = agent_results
+                if aggregator:
+                    aggregated = aggregator.aggregate_results(agent_results)
+                    message['fraud_status'] = "FRAUDULENT" if aggregated['is_fraudulent'] else "CLEAN"
+                    message['fraud_score'] = aggregated['confidence']
+                    message['fraud_reasons'] = aggregated['aggregated_reasons']
+                else:
+                    message['fraud_status'] = "PENDING"
+                    message['fraud_score'] = 0
+                    message['fraud_reasons'] = []
 
                 processed_messages.append(message)
 
@@ -180,7 +186,7 @@ class ParallelizationPattern:
 
         # Print fraud summary
         fraudulent_count = sum(1 for m in processed_messages
-                              if m.get('fraud_status') == 'FRAUDULENT')
+                               if m.get('fraud_status') == 'FRAUDULENT')
         print(f"Fraud Detection Summary: {fraudulent_count}/{len(processed_messages)} messages flagged as fraudulent")
 
         return processed_messages
