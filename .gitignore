@@ -1,0 +1,19 @@
+# Secrets - never commit API keys
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Generated data
+project/swift_messages/
+project/data/
+
+# IDE / OS
+.idea/workspace.xml
+.DS_Store
