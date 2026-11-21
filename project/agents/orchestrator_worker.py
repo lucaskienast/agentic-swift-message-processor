@@ -257,12 +257,11 @@ class OrchestratorWorkerPattern:
                                     "description": f"Summary report for {dimension} group {key}"}
 
             tasks = []
-            for index, key in enumerate(groups, start=1):
+            for key in groups:
                 task = planned[key]
                 task_type = task.get("type") if task.get("type") in pattern.TASK_TYPES else "summary_report"
                 priority = task.get("priority") if task.get("priority") in pattern.PRIORITIES else "medium"
                 tasks.append({
-                    "task_id": f"task_{index:03d}",
                     "type": task_type,
                     "description": task.get("description") or f"Report for {dimension} group {key}",
                     "priority": priority,
@@ -274,8 +273,9 @@ class OrchestratorWorkerPattern:
                         "messages": [pattern.compact_message(m) for m in groups[key]],
                     },
                 })
-            # High-priority reports first
+            # High-priority reports first; ids follow execution order
             tasks.sort(key=lambda t: pattern.PRIORITIES.index(t["priority"]))
+            tasks = [{"task_id": f"task_{index:03d}", **task} for index, task in enumerate(tasks, start=1)]
             return {
                 "analysis": response.get("analysis", "No analysis available"),
                 "grouping": {"dimension": dimension, "rationale": rationale},
