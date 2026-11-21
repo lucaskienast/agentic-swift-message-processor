@@ -175,7 +175,7 @@ class SwiftCorrectionAgent:
                 # INSTRUCTIONS: Add the response_format parameter to ensure JSON output
                 # The format should be: response_format={"type": "json_object"}
                 # This ensures the LLM returns valid JSON that we can parse
-
+                response_format={"type": "json_object"},
                 temperature=0.1
             )
 
