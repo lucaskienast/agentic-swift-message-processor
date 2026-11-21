@@ -5,6 +5,13 @@ This module contains the base classes that all agents inherit from.
 You will implement the BaseAgent abstract class and the SwiftCorrectionAgent.
 """
 
+import json
+from abc import ABC, abstractmethod
+from typing import Any, Dict
+
+from config import Config
+from services.llm_service import LLMService
+
 # TODO 6: Create BaseAgent abstract class (10 points)
 # INSTRUCTIONS:
 # 1. Import ABC and abstractmethod from the abc module
@@ -38,6 +45,70 @@ class BaseAgent(ABC):
 """
 
 # YOUR CODE HERE - Implement BaseAgent class
+
+
+class BaseAgent(ABC):
+    """
+    Abstract base class for all LLM-backed agents.
+
+    It centralizes how agents talk to the LLM service: every subclass gets a
+    shared Config, an LLMService (OpenAI client + model name) and a single
+    JSON-mode completion call. Subclasses only decide *what* to ask by
+    implementing create_prompt().
+    """
+
+    def __init__(self, system_prompt: str = "You are a helpful assistant.",
+                 temperature: float = 0.1):
+        """
+        Initialize the agent with configuration and the LLM service.
+
+        Args:
+            system_prompt: Role/instructions sent as the system message.
+            temperature: Sampling temperature; low values keep financial
+                decisions consistent between runs.
+        """
+        self.config = Config()
+        self.llm_service = LLMService()
+        self.system_prompt = system_prompt
+        self.temperature = temperature
+
+    @abstractmethod
+    def create_prompt(self, data: Any) -> str:
+        """Build the user prompt for this agent from the given input data."""
+
+    def respond(self, prompt: str) -> Dict[str, Any]:
+        """
+        Send the prompt to the LLM using this agent's system prompt.
+
+        Args:
+            prompt: User prompt, usually produced by create_prompt().
+
+        Returns:
+            The parsed JSON response, or {"error": ...} if the call fails.
+        """
+        return self._complete_json(self.system_prompt, prompt)
+
+    def _complete_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+        """
+        Run one JSON-mode chat completion and parse the result.
+
+        Errors are caught and returned as {"error": ...} so a single failed
+        call never crashes the processing pipeline.
+        """
+        try:
+            response = self.llm_service.client.chat.completions.create(
+                model=self.llm_service.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=self.temperature
+            )
+            return json.loads(response.choices[0].message.content or "{}")
+        except Exception as e:
+            print(f"Error in {self.__class__.__name__}: {e}")
+            return {"error": str(e)}
 
 
 class SwiftCorrectionAgent:
@@ -277,3 +348,36 @@ class FraudAggAgent:
             "total_risk_score": round(avg_risk, 3),
             "aggregated_reasons": all_reasons
         }
+
+
+if __name__ == "__main__":
+    # Self-test (makes a real OpenAI call). Run from the project/ folder:
+    #   uv run python -m agents.workflow_agents.base_agents
+
+    class BicDecoderAgent(BaseAgent):
+        """Minimal concrete BaseAgent used to exercise the LLM round trip."""
+
+        def __init__(self):
+            super().__init__(
+                system_prompt="You are a SWIFT reference-data expert. Respond in JSON."
+            )
+
+        def create_prompt(self, data: Any) -> str:
+            """Ask the LLM to decode the structure of a BIC code."""
+            return (
+                f"Decode the BIC '{data}'. Return JSON with keys "
+                '"bank_code", "country_code", "location_code", "branch_code".'
+            )
+
+    print("Testing BaseAgent...")
+    try:
+        BaseAgent()
+    except TypeError as e:
+        print(f"  OK - BaseAgent is abstract: {e}")
+
+    agent = BicDecoderAgent()
+    result = agent.respond(agent.create_prompt("DEUTDEFFXXX"))
+    print(f"  LLM response: {result}")
+    expected = {"bank_code": "DEUT", "country_code": "DE",
+                "location_code": "FF", "branch_code": "XXX"}
+    print(f"  Matches expected decoding: {result == expected}")
