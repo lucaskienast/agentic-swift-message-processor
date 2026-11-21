@@ -513,10 +513,18 @@ class FraudAggAgent:
 
     def __init__(self):
         self.threshold = 0.5  # Fraud threshold (50%)
+        # A single agent this sure of fraud (e.g. a sanctioned country) is
+        # decisive on its own; averaging would let clean scores from the
+        # other agents dilute it below the threshold
+        self.decisive_threshold = 0.9
 
     def aggregate_results(self, fraud_results):
         """
         Aggregate fraud detection results from multiple agents.
+
+        A message is fraudulent when the average risk reaches the threshold,
+        or when any single agent reaches the decisive threshold. In the
+        decisive case, that agent's score becomes the reported risk.
 
         Args:
             fraud_results: List of fraud detection results from different agents
@@ -544,13 +552,20 @@ class FraudAggAgent:
             for reason in reasons:
                 all_reasons.append(f"[{agent_name}] {reason}")
 
-        # Determine if fraudulent based on threshold
-        is_fraudulent = avg_risk >= self.threshold
+        # Determine if fraudulent: average over the threshold, or one decisive signal
+        top_result = max(fraud_results, key=lambda r: r.get('risk_score', 0))
+        top_risk = top_result.get('risk_score', 0)
+        risk = avg_risk
+        if top_risk >= self.decisive_threshold:
+            risk = max(avg_risk, top_risk)
+            all_reasons.append(f"[{self.__class__.__name__}] Decisive signal from "
+                               f"{top_result.get('agent', 'Unknown')} (score {top_risk})")
+        is_fraudulent = risk >= self.threshold
 
         return {
             "is_fraudulent": is_fraudulent,
-            "confidence": round(avg_risk * 100, 2),
-            "total_risk_score": round(avg_risk, 3),
+            "confidence": round(risk * 100, 2),
+            "total_risk_score": round(risk, 3),
             "aggregated_reasons": all_reasons
         }
 

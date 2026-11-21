@@ -22,6 +22,9 @@ class Config:
     # Number of generated messages that get a deliberate, fixable format
     # defect so the Evaluator-Optimizer has something to correct
     MALFORMED_MESSAGE_COUNT = 3
+    # Number of generated messages turned into suspicious scenarios so the
+    # fraud stage and the fraud-focused report have real cases to work on
+    SUSPICIOUS_MESSAGE_COUNT = 2
 
     # Processing settings
     MAX_WORKERS = 8

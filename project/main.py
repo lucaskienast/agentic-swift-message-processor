@@ -50,6 +50,7 @@ class SWIFTProcessingSystem:
         )
         messages = [self._to_pipeline_dict(message) for message in swift_messages]
         self._inject_format_defects(messages, self.config.MALFORMED_MESSAGE_COUNT)
+        self._inject_suspicious_scenarios(messages, self.config.SUSPICIOUS_MESSAGE_COUNT)
         return messages
 
     @staticmethod
@@ -84,6 +85,52 @@ class SWIFTProcessingSystem:
                 bic = message["sender_bic"]
                 message["sender_bic"] = f"{bic[:4]} {bic[4:6]} {bic[6:8]} {bic[8:]}".strip()
             print(f"  Injected defect '{defect}' into message {message['message_id']}")
+
+    @staticmethod
+    def _inject_suspicious_scenarios(messages: List[Dict], count: int) -> None:
+        """
+        Turn a few well-formed messages into realistic suspicious payments.
+
+        The generator only produces ordinary traffic, so the fraud agents would
+        almost never have anything to flag. Each scenario keeps the message
+        valid (it must pass the Evaluator-Optimizer) and alternates between:
+        - sanctioned_corridor: the receiver bank is moved to Iran (country
+          code IR), which GeographicRiskAgent treats as a sanctions hit
+        - test_bank_pressure: the receiver BIC uses a TEST bank code and the
+          remittance text pushes for an urgent, confidential payment, which
+          FraudPatternDetectionAgent picks up (MT103 only, because MT202
+          bank-to-bank transfers carry no remittance information)
+
+        Messages that already carry a format defect are left alone, so each
+        message tells one story. The scenario is only logged, not stored on
+        the message, so the agents have to detect it themselves.
+        """
+        reference_limit = 16
+        candidates = [
+            m for m in messages
+            if len(m["reference"]) <= reference_limit
+            and m["amount"].split()[-1].isupper()
+            and " " not in m["sender_bic"]
+        ]
+        random.shuffle(candidates)
+        scenarios = ["sanctioned_corridor", "test_bank_pressure"]
+
+        for index in range(count):
+            scenario = scenarios[index % len(scenarios)]
+            eligible = [m for m in candidates
+                        if scenario == "sanctioned_corridor" or m["message_type"] == "MT103"]
+            if not eligible:
+                print(f"  No eligible message for scenario '{scenario}', skipped")
+                continue
+            message = eligible[0]
+            candidates.remove(message)
+            bic = message["receiver_bic"]
+            if scenario == "sanctioned_corridor":
+                message["receiver_bic"] = f"{bic[:4]}IR{bic[6:]}"
+            else:
+                message["receiver_bic"] = f"TEST{bic[4:]}"
+                message["remittance_info"] = "Urgent - release immediately, keep confidential"
+            print(f"  Injected scenario '{scenario}' into message {message['message_id']}")
 
     @staticmethod
     def _to_pipeline_dict(message: SWIFTMessage) -> Dict:
