@@ -6,6 +6,7 @@ Each agent in the chain builds upon the insights from previous agents.
 """
 
 import json
+import time
 from typing import Dict, List, Any
 from openai import OpenAI
 from config import Config
@@ -46,6 +47,8 @@ class PromptChainingPattern:
         self.client = OpenAI(api_key=self.config.OPENAI_API_KEY or None)
         self.model = self.config.OPENAI_MODEL
         self.temperature = 0.1  # Low temperature for consistent analysis
+        # Timing and error of the most recent LLM call, read by _record_step
+        self._last_call = {"seconds": 0.0, "error": None}
 
     def _create_initial_screener_prompt(self, messages: List[Dict]) -> tuple:
         """
@@ -247,6 +250,8 @@ class PromptChainingPattern:
         Returns:
             Parsed JSON response from the LLM
         """
+        started = time.perf_counter()
+        self._last_call = {"seconds": 0.0, "error": None}
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -262,7 +267,55 @@ class PromptChainingPattern:
 
         except Exception as e:
             print(f"Error calling LLM: {e}")
+            self._last_call["error"] = str(e)
             return {}
+        finally:
+            self._last_call["seconds"] = round(time.perf_counter() - started, 2)
+
+    def _record_step(self, chain_log: List[Dict], step: int, agent: str, output_key: str,
+                     result: Dict, messages: List[Dict]) -> None:
+        """
+        Append one structured entry to the chain log and print a one-line status.
+
+        Args:
+            chain_log: The log being built for this chain run
+            step: Position of the agent in the chain (1-5)
+            agent: Human-readable agent role
+            output_key: Key under which the result is stored in chain_results
+            result: The agent's parsed JSON output
+            messages: The messages under analysis (to measure coverage)
+        """
+        message_ids = {m.get('message_id') for m in messages}
+        covered = set()
+        for value in result.values():
+            if isinstance(value, list):
+                covered |= {e.get('message_id') for e in value if isinstance(e, dict)} & message_ids
+        summary = next((result[k] for k in ("summary", "technical_summary", "compliance_summary",
+                                            "batch_summary") if k in result), "")
+        status = "error" if self._last_call["error"] else ("ok" if result else "empty")
+        chain_log.append({
+            "step": step,
+            "agent": agent,
+            "output_key": output_key,
+            "status": status,
+            "duration_seconds": self._last_call["seconds"],
+            "messages_covered": len(covered),
+            "messages_total": len(message_ids),
+            "summary": str(summary)[:200],
+            "error": self._last_call["error"],
+        })
+        print(f"  -> {status} in {self._last_call['seconds']}s, "
+              f"covered {len(covered)}/{len(message_ids)} messages")
+
+    @staticmethod
+    def _print_chain_log(chain_log: List[Dict]) -> None:
+        """Print the structured chain log as a compact table."""
+        print("\nPrompt chain log:")
+        print(f"  {'#':<2} {'Agent':<34} {'Output key':<20} {'Status':<6} {'Time':>6} {'Covered':>8}")
+        for entry in chain_log:
+            covered = f"{entry['messages_covered']}/{entry['messages_total']}"
+            print(f"  {entry['step']:<2} {entry['agent']:<34} {entry['output_key']:<20} "
+                  f"{entry['status']:<6} {entry['duration_seconds']:>5}s {covered:>8}")
 
     def process_chain(self, messages: List[Dict]) -> Dict:
         """
@@ -272,16 +325,23 @@ class PromptChainingPattern:
             messages: List of SWIFT messages to analyze
 
         Returns:
-            Complete analysis results from all agents in the chain
+            Complete analysis results from all agents in the chain, plus a
+            structured 'chain_log' with one entry per step (agent, status,
+            duration, message coverage, summary)
         """
         print("Starting Prompt Chaining Analysis...")
         chain_results = {}
+        # Structured log of every step; attached to the results only at the end,
+        # so it never leaks into the agents' prompts
+        chain_log = []
 
         # Step 1: Initial Screening
         print("Step 1: Initial Screener analyzing messages...")
         system_prompt, user_prompt = self._create_initial_screener_prompt(messages)
         initial_results = self._call_llm(system_prompt, user_prompt)
         chain_results['initial_screening'] = initial_results
+        self._record_step(chain_log, 1, "Initial Screener (junior analyst)", "initial_screening",
+                          initial_results, messages)
 
         # TODO 13: Implement Step 2 (7 points)
         # INSTRUCTIONS:
@@ -302,6 +362,7 @@ class PromptChainingPattern:
         system_prompt, user_prompt = self._create_technical_analyst_prompt(messages, initial_results)
         technical_results = self._call_llm(system_prompt, user_prompt)
         chain_results['technical_analysis'] = technical_results
+        self._record_step(chain_log, 2, "Technical Analyst", "technical_analysis", technical_results, messages)
 
         # Step 3: Risk Assessor (Provided as example)
         print("Step 3: Risk Assessor evaluating patterns...")
@@ -318,6 +379,7 @@ class PromptChainingPattern:
 
         risk_results = self._call_llm(risk_prompt_system, risk_prompt_user)
         chain_results['risk_assessment'] = risk_results
+        self._record_step(chain_log, 3, "Risk Assessor", "risk_assessment", risk_results, messages)
 
         # TODO 14: Implement Step 4 (8 points)
         # INSTRUCTIONS:
@@ -338,12 +400,14 @@ class PromptChainingPattern:
         system_prompt, user_prompt = self._create_compliance_officer_prompt(messages, chain_results)
         compliance_results = self._call_llm(system_prompt, user_prompt)
         chain_results['compliance_review'] = compliance_results
+        self._record_step(chain_log, 4, "Compliance Officer", "compliance_review", compliance_results, messages)
 
         # Step 5: Final Reviewer (Provided)
         print("Step 5: Final Reviewer making decisions...")
         system_prompt, user_prompt = self._create_final_reviewer_prompt(messages, chain_results)
         final_results = self._call_llm(system_prompt, user_prompt)
         chain_results['final_review'] = final_results
+        self._record_step(chain_log, 5, "Final Reviewer", "final_review", final_results, messages)
 
         # Update messages with final decisions
         if 'final_decisions' in final_results:
@@ -356,6 +420,8 @@ class PromptChainingPattern:
                     message['fraud_confidence'] = decision.get('confidence', 0)
                     message['fraud_justification'] = decision.get('justification', '')
 
+        chain_results['chain_log'] = chain_log
+        self._print_chain_log(chain_log)
         print("Prompt Chaining Analysis Complete!")
         return chain_results
 
