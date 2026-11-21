@@ -271,7 +271,7 @@ class SWIFTProcessingSystem:
             # processed_messages = self.process_with_parallelization(validated_messages)
             #
             # YOUR CODE HERE (remove the pass statement):
-            pass
+            processed_messages = self.process_with_parallelization(validated_messages)
 
             # TODO 3: Call prompt chaining (5 points)
             # INSTRUCTIONS:
