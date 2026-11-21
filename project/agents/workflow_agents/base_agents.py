@@ -136,7 +136,20 @@ class SwiftCorrectionAgent:
         """
         system_prompt = """You are a SWIFT message correction expert.
         Fix the validation errors while maintaining the business intent.
-        Return the corrected message in JSON format."""
+        Return the corrected message in JSON format.
+
+        Correction rules:
+        - Make the smallest possible change that resolves each listed error.
+        - Never invent, guess or replace identifiers or business data. Keep
+          every character of a BIC (only remove whitespace or fix letter case),
+          and never change the numeric amount, currency, message_type or
+          message_id.
+        - Shorten an over-long reference by keeping only its first 12
+          characters.
+        - If an error cannot be fixed without guessing (e.g. an amount outside
+          the allowed range or an unknown BIC), leave that field unchanged so
+          the message is routed to manual review.
+        - Leave every field that has no error unchanged."""
 
         user_prompt = f"""
         Original SWIFT Message:
@@ -206,11 +219,47 @@ class SwiftCorrectionAgent:
 
             # Overlay the corrections on the original message so fields the LLM
             # left out (message_id, statuses, timestamps) are never lost
-            return {**message, **result}
+            return self._enforce_guardrails(message, {**message, **result})
 
         except Exception as e:
             print(f"Error in SwiftCorrectionAgent: {e}")
             return message  # Return original if correction fails
+
+    @staticmethod
+    def _enforce_guardrails(original: Dict, corrected: Dict) -> Dict:
+        """
+        Deterministically undo corrections that would change business data.
+
+        The prompt asks the LLM not to touch these fields, but a prompt is not
+        a guarantee, so the message type and the numeric amount are restored
+        if the LLM altered them. Fixing the amount's currency case is allowed.
+
+        Args:
+            original: Message before correction.
+            corrected: Message after the LLM's corrections were applied.
+
+        Returns:
+            The corrected message with protected fields restored.
+        """
+        def numeric_amount(amount: Any) -> float:
+            token = str(amount).split()[0] if str(amount).split() else ""
+            return float("".join(c for c in token if c.isdigit() or c == "."))
+
+        if corrected.get("message_type") != original.get("message_type"):
+            print(f"  Guardrail: reverted message_type change "
+                  f"{original.get('message_type')} -> {corrected.get('message_type')}")
+            corrected["message_type"] = original.get("message_type")
+
+        try:
+            amount_changed = numeric_amount(corrected.get("amount")) != numeric_amount(original.get("amount"))
+        except ValueError:
+            amount_changed = True
+        if amount_changed:
+            print(f"  Guardrail: reverted amount change "
+                  f"{original.get('amount')} -> {corrected.get('amount')}")
+            corrected["amount"] = original.get("amount")
+
+        return corrected
 
 
 class FraudAmountDetectionAgent:
