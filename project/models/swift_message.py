@@ -2,7 +2,7 @@
 SWIFT message models and validation
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, Literal
 from datetime import datetime
 import uuid
@@ -10,6 +10,9 @@ import uuid
 
 class SWIFTMessage(BaseModel):
     """SWIFT message model with validation"""
+
+    # Pydantic v2 settings (replaces the deprecated class-based Config)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     message_type: Literal["MT103", "MT202"]
@@ -62,7 +65,3 @@ class SWIFTMessage(BaseModel):
         """Mark message as clean"""
         self.fraud_status = "CLEAN"
         self.fraud_score = score
-
-    class Config:
-        """Pydantic settings for the SWIFT message model."""
-        arbitrary_types_allowed = True
