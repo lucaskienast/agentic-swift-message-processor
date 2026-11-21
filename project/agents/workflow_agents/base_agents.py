@@ -192,7 +192,21 @@ class SwiftCorrectionAgent:
             # result = json.loads(content)
             # return result
 
-            return {}  # Replace with parsed response
+            content = response.choices[0].message.content
+            result = json.loads(content or "{}")
+
+            # The LLM sometimes nests the message, e.g. {"corrected_message": {...}}
+            if len(result) == 1:
+                (only_value,) = result.values()
+                if isinstance(only_value, dict):
+                    result = only_value
+
+            # The message identity is never the LLM's to change
+            result.pop("message_id", None)
+
+            # Overlay the corrections on the original message so fields the LLM
+            # left out (message_id, statuses, timestamps) are never lost
+            return {**message, **result}
 
         except Exception as e:
             print(f"Error in SwiftCorrectionAgent: {e}")
