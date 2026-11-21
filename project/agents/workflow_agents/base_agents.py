@@ -374,9 +374,13 @@ class GeographicRiskAgent(BaseAgent):
       A sender or receiver in a sanctioned/high-risk jurisdiction scores 1.0
       immediately, without an LLM call - this rule must never depend on a
       model's interpretation.
-    - LLM: for all other payments, a prompt describing high-risk corridor
-      patterns (secrecy jurisdictions, third-currency payments, implausible
-      purpose for the route) asks the model to score the corridor.
+    - Deterministic: the factual corridor rules (secrecy jurisdiction,
+      third-currency payment, large cross-border amount) are computed in
+      code. Real runs showed the LLM mixing up sender and receiver, so facts
+      that can be checked from the data are never left to the model.
+    - LLM: judges whether the stated purpose (remittance info) is plausible
+      for the corridor and amount - the one rule that needs language
+      understanding. MT202 messages carry no purpose, so they need no call.
     """
 
     # Illustrative lists for this project, not an official sanctions list
@@ -391,7 +395,10 @@ class GeographicRiskAgent(BaseAgent):
         "US": "USD", "GB": "GBP", "DE": "EUR", "FR": "EUR", "JP": "JPY",
         "CH": "CHF", "SG": "SGD", "HK": "HKD", "AU": "AUD", "CA": "CAD"
     }
-    # Points per corridor rule in the LLM prompt (summed deterministically)
+    SETTLEMENT_CURRENCIES = {"USD", "EUR"}
+    SECRECY_AMOUNT_LIMIT = 100_000
+    CROSS_BORDER_AMOUNT_LIMIT = 1_000_000
+    # Points per corridor rule, summed in code
     RULE_POINTS = {1: 0.3, 2: 0.2, 3: 0.2, 4: 0.2}
 
     def __init__(self):
@@ -399,7 +406,7 @@ class GeographicRiskAgent(BaseAgent):
         super().__init__(
             system_prompt=(
                 "You are a SWIFT geographic risk analyst specializing in AML "
-                "corridor analysis. Apply the scoring rules exactly and "
+                "corridor analysis. Judge only what you are asked and "
                 "respond in JSON."
             ),
             temperature=0
@@ -411,41 +418,65 @@ class GeographicRiskAgent(BaseAgent):
         bic = (bic or "").replace(" ", "").upper()
         return bic[4:6] if len(bic) >= 6 else ""
 
-    def create_prompt(self, data: Dict) -> str:
-        """
-        Build the corridor-risk prompt for one message.
+    @staticmethod
+    def _parse_amount(amount: str):
+        """Split an amount like '1234.56 USD' into (1234.56, 'USD'); (0.0, '') if unparseable."""
+        parts = (amount or "").split()
+        try:
+            return float(parts[0]), parts[-1].upper() if len(parts) > 1 else ""
+        except (IndexError, ValueError):
+            return 0.0, ""
 
-        Args:
-            data: Message dict enriched with sender/receiver country and
-                their domestic currencies.
+    def _corridor_rules(self, sender: str, receiver: str, value: float, currency: str) -> Dict[int, str]:
+        """
+        Evaluate the factual corridor rules 1-3 deterministically.
 
         Returns:
-            The user prompt describing the fraud pattern and output format.
+            Mapping of applied rule number to a reason built from the data.
         """
-        return f"""Score the geographic risk of this SWIFT payment corridor.
+        rules = {}
+        cross_border = bool(sender and receiver and sender != receiver)
+        if (receiver in self.SECRECY_JURISDICTIONS and cross_border
+                and value > self.SECRECY_AMOUNT_LIMIT):
+            rules[1] = (f"{value:,.2f} {currency} sent from {sender} to secrecy "
+                        f"jurisdiction {receiver} (above {self.SECRECY_AMOUNT_LIMIT:,})")
+        # Rule 2 needs both domestic currencies; unknown countries are not flagged
+        sender_ccy = self.DOMESTIC_CURRENCY.get(sender)
+        receiver_ccy = self.DOMESTIC_CURRENCY.get(receiver)
+        if (sender_ccy and receiver_ccy and currency
+                and currency not in {sender_ccy, receiver_ccy} | self.SETTLEMENT_CURRENCIES):
+            rules[2] = (f"Third-currency payment: {currency} from {sender} ({sender_ccy}) "
+                        f"to {receiver} ({receiver_ccy})")
+        if cross_border and value > self.CROSS_BORDER_AMOUNT_LIMIT:
+            rules[3] = (f"Cross-border amount {value:,.2f} {currency} ({sender} -> {receiver}) "
+                        f"above {self.CROSS_BORDER_AMOUNT_LIMIT:,}")
+        return rules
 
-Payment:
+    def create_prompt(self, data: Dict) -> str:
+        """
+        Build the purpose-plausibility prompt (rule 4) for one message.
+
+        Args:
+            data: Message dict enriched with sender/receiver country.
+
+        Returns:
+            The user prompt describing the check and output format.
+        """
+        return f"""Judge whether the stated purpose of this SWIFT payment is plausible.
+
+Payment (sender -> receiver):
 - Message type: {data.get('message_type')}
 - Amount: {data.get('amount')}
-- Sender country: {data['sender_country']} (domestic currency {data['sender_currency']})
-- Receiver country: {data['receiver_country']} (domestic currency {data['receiver_currency']})
-- Remittance info: {data.get('remittance_info') or 'n/a'}
+- Sender country: {data['sender_country']}
+- Receiver country: {data['receiver_country']}
+- Stated purpose (remittance info): {data.get('remittance_info')}
 
-Secrecy jurisdictions: {', '.join(sorted(self.SECRECY_JURISDICTIONS))}
+The purpose is implausible only if it clearly does not fit the amount or the
+route, e.g. a salary transfer of several million, or a small "property
+purchase". Ordinary purposes with ordinary amounts are plausible. Only flag
+it if you can name the specific mismatch.
 
-Risk rules - decide for EACH rule whether it applies to this payment:
-1. Receiver is in a secrecy jurisdiction, sender is in a different country
-   and the amount is above 100,000.
-2. Third-currency payment: the currency is neither the sender's nor the
-   receiver's domestic currency, and it is not USD or EUR (global settlement
-   currencies).
-3. Cross-border amount above 1,000,000.
-4. The stated purpose is implausible for this corridor or amount (e.g. a
-   salary transfer of several million). Only apply it if you can name the
-   specific mismatch.
-
-Return JSON: {{"applied_rules": [{{"rule": <1-4>, "reason": "<specific evidence from this payment>"}}]}}
-Return {{"applied_rules": []}} if no rule applies. Do not compute a score."""
+Return JSON: {{"implausible": true|false, "reason": "<the specific mismatch, or empty>"}}"""
 
     def analyze(self, message: Dict) -> Dict:
         """
@@ -469,37 +500,29 @@ Return {{"applied_rules": []}} if no rule applies. Do not compute a score."""
                 "fraud_reasons": [f"High-risk/sanctioned jurisdiction involved: {', '.join(flagged)}"]
             }
 
-        context = {
-            **message,
-            "sender_country": sender_country or "unknown",
-            "receiver_country": receiver_country or "unknown",
-            "sender_currency": self.DOMESTIC_CURRENCY.get(sender_country, "unknown"),
-            "receiver_currency": self.DOMESTIC_CURRENCY.get(receiver_country, "unknown"),
-        }
-        result = self.respond(self.create_prompt(context))
+        value, currency = self._parse_amount(message.get("amount"))
+        applied = self._corridor_rules(sender_country, receiver_country, value, currency)
+        manual_review = None
 
-        if "error" in result:
-            # Conservative fallback: an unavailable check needs human review
-            return {
-                "agent": self.__class__.__name__,
-                "risk_score": 0.5,
-                "fraud_reasons": [f"Geographic LLM check failed, manual review needed: {result['error']}"]
+        # Rule 4 needs language understanding, and only applies when a purpose is stated
+        if message.get("remittance_info"):
+            context = {
+                **message,
+                "sender_country": sender_country or "unknown",
+                "receiver_country": receiver_country or "unknown",
             }
+            result = self.respond(self.create_prompt(context))
+            if "error" in result:
+                manual_review = f"Purpose check failed, manual review needed: {result['error']}"
+            elif result.get("implausible") is True:
+                applied[4] = f"Implausible purpose: {result.get('reason', '')}"
 
-        # The LLM judges which rules apply; the score is summed in code because
-        # LLM arithmetic is unreliable (real runs returned 0.3+0.2+0.2 = 0.5)
-        risk_score = 0.0
-        fraud_reasons = []
-        applied = set()
-        for item in result.get("applied_rules", []):
-            try:
-                rule = int(item.get("rule"))
-            except (AttributeError, TypeError, ValueError):
-                continue
-            if rule in self.RULE_POINTS and rule not in applied:
-                applied.add(rule)
-                risk_score += self.RULE_POINTS[rule]
-                fraud_reasons.append(f"Rule {rule}: {item.get('reason', '')}")
+        risk_score = sum(self.RULE_POINTS[rule] for rule in applied)
+        fraud_reasons = [f"Rule {rule}: {reason}" for rule, reason in sorted(applied.items())]
+        if manual_review:
+            # Conservative fallback: an unavailable check needs human review
+            risk_score = max(risk_score, 0.5)
+            fraud_reasons.append(manual_review)
 
         return {
             "agent": self.__class__.__name__,
