@@ -62,6 +62,10 @@ class ParallelizationPattern:
         # LLM-backed agents need more than the original 5s per result
         self.result_timeout = Config.AGENT_TIMEOUT_SECONDS
 
+        # Dedicated aggregator that combines all agents' results (TODO 11).
+        # Created once here so test_agents() can use it too.
+        self.aggregator = FraudAggAgent()
+
     def _process_message(self, message: Dict, agent: Any) -> Dict:
         """
         Process a single message with a specific fraud detection agent.
@@ -110,7 +114,7 @@ class ParallelizationPattern:
         # aggregator = FraudAggAgent()
 
         # YOUR CODE HERE - Initialize the aggregator
-        aggregator = None  # Replace with FraudAggAgent instance
+        aggregator = self.aggregator  # FraudAggAgent instance created in __init__
 
         # Process messages in parallel
         processed_messages = []
