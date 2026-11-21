@@ -32,6 +32,14 @@ class Config:
     # Max seconds to wait for one fraud agent's result (LLM calls can be slow)
     AGENT_TIMEOUT_SECONDS = 60
 
+    # Report sets produced by the Orchestrator-Worker step (TODO 5), in order.
+    # Available filters: clean, fraudulent, high_value, mt103.
+    # Override without code changes, e.g. REPORT_SETS=fraudulent python main.py
+    REPORT_SETS = tuple(
+        name.strip() for name in os.getenv("REPORT_SETS", "clean,fraudulent").split(",") if name.strip()
+    )
+    HIGH_VALUE_THRESHOLD = 50000
+
     # OpenAI settings (read by services/llm_service.py; the key comes from .env)
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")

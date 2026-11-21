@@ -35,7 +35,7 @@ class SWIFTProcessingSystem:
         self.parallelization_agent = ParallelizationPattern()
         self.orchestrator_worker = OrchestratorWorkerPattern()
         self.prompt_chaining_agent = PromptChainingPattern()
-    
+
     def generate_swift_messages(self) -> List[Dict]:
         """
         Generate SWIFT messages and convert them into pipeline dictionaries.
@@ -192,11 +192,16 @@ class SWIFTProcessingSystem:
         chain_results = self.prompt_chaining_agent.process_chain(messages)
         return chain_results
 
-    def process_with_orchestrator_worker(self, messages: List[Dict]) -> None:
+    def process_with_orchestrator_worker(self, messages: List[Dict]) -> Dict:
         """
         Step 4: Process transactions using Orchestrator-Worker pattern
 
         This method uses an orchestrator to create tasks and workers to execute them.
+        It produces one report set per entry in Config.REPORT_SETS, each built
+        from a different message filter (see REPORT_FILTERS).
+
+        Returns:
+            Orchestrator results per report set name.
         """
         print("\n" + "=" * 60)
         print("STEP 4: ORCHESTRATOR-WORKER PATTERN")
@@ -232,13 +237,44 @@ class SWIFTProcessingSystem:
         # Option 3 - Specific message type:
         # clean_messages = [msg for msg in messages if msg.get('message_type') == 'MT103']
 
-        # Current implementation (Set 1) - Non-fraudulent messages
-        clean_messages = [msg for msg in messages if msg.get('fraud_status') != "FRAUDULENT"]
+        # Implementation: every filter is a named report set, and the sets in
+        # Config.REPORT_SETS (default: Set 1 "clean" and Set 2 "fraudulent")
+        # each get their own orchestrator run, grouping plan and reports.
+        report_results = {}
+        for set_number, set_name in enumerate(self.config.REPORT_SETS, start=1):
+            if set_name not in self.REPORT_FILTERS:
+                print(f"Unknown report set '{set_name}' skipped "
+                      f"(available: {', '.join(self.REPORT_FILTERS)})")
+                continue
+            description, keep = self.REPORT_FILTERS[set_name]
+            clean_messages = [msg for msg in messages if keep(msg, self.config)]
+            print(f"\n>>> REPORT SET {set_number}: {set_name} - {description} "
+                  f"({len(clean_messages)} of {len(messages)} messages)")
 
-        # Process with orchestrator
-        self.orchestrator_worker.process_with_orchestrator(clean_messages)
-        
-    
+            # Process with orchestrator
+            report_results[set_name] = self.orchestrator_worker.process_with_orchestrator(clean_messages)
+        return report_results
+
+    @staticmethod
+    def _amount_value(message: Dict) -> float:
+        """Numeric part of an amount like '1234.56 USD' (0.0 if unparseable)."""
+        try:
+            return float(str(message.get('amount', '0')).split()[0])
+        except (IndexError, ValueError):
+            return 0.0
+
+    # Named message filters for the report sets (TODO 5): name -> (description, predicate)
+    REPORT_FILTERS = {
+        "clean": ("non-fraudulent messages",
+                  lambda msg, config: msg.get('fraud_status') != "FRAUDULENT"),
+        "fraudulent": ("messages flagged as fraudulent",
+                       lambda msg, config: msg.get('fraud_status') == "FRAUDULENT"),
+        "high_value": ("high-value transactions (amount above Config.HIGH_VALUE_THRESHOLD)",
+                       lambda msg, config: SWIFTProcessingSystem._amount_value(msg) > config.HIGH_VALUE_THRESHOLD),
+        "mt103": ("MT103 customer transfers only",
+                  lambda msg, config: msg.get('message_type') == 'MT103'),
+    }
+
     def run(self):
         """Main execution method - Orchestrates all agent patterns in sequence"""
         try:
