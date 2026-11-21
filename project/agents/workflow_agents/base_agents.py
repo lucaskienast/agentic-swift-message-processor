@@ -365,6 +365,149 @@ class FraudPatternDetectionAgent:
         }
 
 
+class GeographicRiskAgent(BaseAgent):
+    """
+    Third fraud detection agent (TODO 10): geographic / corridor risk.
+
+    Combines deterministic and LLM-based checks:
+    - Deterministic: country codes are read from the BICs (characters 5-6).
+      A sender or receiver in a sanctioned/high-risk jurisdiction scores 1.0
+      immediately, without an LLM call - this rule must never depend on a
+      model's interpretation.
+    - LLM: for all other payments, a prompt describing high-risk corridor
+      patterns (secrecy jurisdictions, third-currency payments, implausible
+      purpose for the route) asks the model to score the corridor.
+    """
+
+    # Illustrative lists for this project, not an official sanctions list
+    HIGH_RISK_COUNTRIES = {
+        "AF", "BY", "CU", "IR", "IQ", "KP", "LY", "MM", "RU", "SD", "SO", "SS",
+        "SY", "VE", "YE"
+    }
+    SECRECY_JURISDICTIONS = {
+        "AE", "BM", "BS", "CH", "GG", "HK", "IM", "JE", "KY", "LU", "PA", "SG", "VG"
+    }
+    DOMESTIC_CURRENCY = {
+        "US": "USD", "GB": "GBP", "DE": "EUR", "FR": "EUR", "JP": "JPY",
+        "CH": "CHF", "SG": "SGD", "HK": "HKD", "AU": "AUD", "CA": "CAD"
+    }
+    # Points per corridor rule in the LLM prompt (summed deterministically)
+    RULE_POINTS = {1: 0.3, 2: 0.2, 3: 0.2, 4: 0.2}
+
+    def __init__(self):
+        """Initialize with a fraud-analyst persona and deterministic scoring."""
+        super().__init__(
+            system_prompt=(
+                "You are a SWIFT geographic risk analyst specializing in AML "
+                "corridor analysis. Apply the scoring rules exactly and "
+                "respond in JSON."
+            ),
+            temperature=0
+        )
+
+    @staticmethod
+    def _country(bic: str) -> str:
+        """Return the ISO country code embedded in a BIC (characters 5-6)."""
+        bic = (bic or "").replace(" ", "").upper()
+        return bic[4:6] if len(bic) >= 6 else ""
+
+    def create_prompt(self, data: Dict) -> str:
+        """
+        Build the corridor-risk prompt for one message.
+
+        Args:
+            data: Message dict enriched with sender/receiver country and
+                their domestic currencies.
+
+        Returns:
+            The user prompt describing the fraud pattern and output format.
+        """
+        return f"""Score the geographic risk of this SWIFT payment corridor.
+
+Payment:
+- Message type: {data.get('message_type')}
+- Amount: {data.get('amount')}
+- Sender country: {data['sender_country']} (domestic currency {data['sender_currency']})
+- Receiver country: {data['receiver_country']} (domestic currency {data['receiver_currency']})
+- Remittance info: {data.get('remittance_info') or 'n/a'}
+
+Secrecy jurisdictions: {', '.join(sorted(self.SECRECY_JURISDICTIONS))}
+
+Risk rules - decide for EACH rule whether it applies to this payment:
+1. Receiver is in a secrecy jurisdiction, sender is in a different country
+   and the amount is above 100,000.
+2. Third-currency payment: the currency is neither the sender's nor the
+   receiver's domestic currency, and it is not USD or EUR (global settlement
+   currencies).
+3. Cross-border amount above 1,000,000.
+4. The stated purpose is implausible for this corridor or amount (e.g. a
+   salary transfer of several million). Only apply it if you can name the
+   specific mismatch.
+
+Return JSON: {{"applied_rules": [{{"rule": <1-4>, "reason": "<specific evidence from this payment>"}}]}}
+Return {{"applied_rules": []}} if no rule applies. Do not compute a score."""
+
+    def analyze(self, message: Dict) -> Dict:
+        """
+        Analyze a SWIFT message for geographic / corridor fraud risk.
+
+        Args:
+            message: The SWIFT message to analyze.
+
+        Returns:
+            dict with agent name, risk_score (0-1) and fraud_reasons.
+        """
+        sender_country = self._country(message.get("sender_bic"))
+        receiver_country = self._country(message.get("receiver_bic"))
+
+        # Deterministic fast path: high-risk jurisdictions are always flagged
+        flagged = [c for c in (sender_country, receiver_country) if c in self.HIGH_RISK_COUNTRIES]
+        if flagged:
+            return {
+                "agent": self.__class__.__name__,
+                "risk_score": 1.0,
+                "fraud_reasons": [f"High-risk/sanctioned jurisdiction involved: {', '.join(flagged)}"]
+            }
+
+        context = {
+            **message,
+            "sender_country": sender_country or "unknown",
+            "receiver_country": receiver_country or "unknown",
+            "sender_currency": self.DOMESTIC_CURRENCY.get(sender_country, "unknown"),
+            "receiver_currency": self.DOMESTIC_CURRENCY.get(receiver_country, "unknown"),
+        }
+        result = self.respond(self.create_prompt(context))
+
+        if "error" in result:
+            # Conservative fallback: an unavailable check needs human review
+            return {
+                "agent": self.__class__.__name__,
+                "risk_score": 0.5,
+                "fraud_reasons": [f"Geographic LLM check failed, manual review needed: {result['error']}"]
+            }
+
+        # The LLM judges which rules apply; the score is summed in code because
+        # LLM arithmetic is unreliable (real runs returned 0.3+0.2+0.2 = 0.5)
+        risk_score = 0.0
+        fraud_reasons = []
+        applied = set()
+        for item in result.get("applied_rules", []):
+            try:
+                rule = int(item.get("rule"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if rule in self.RULE_POINTS and rule not in applied:
+                applied.add(rule)
+                risk_score += self.RULE_POINTS[rule]
+                fraud_reasons.append(f"Rule {rule}: {item.get('reason', '')}")
+
+        return {
+            "agent": self.__class__.__name__,
+            "risk_score": round(min(risk_score, 1.0), 3),
+            "fraud_reasons": fraud_reasons
+        }
+
+
 class FraudAggAgent:
     """Agent for aggregating fraud detection results from multiple agents."""
 

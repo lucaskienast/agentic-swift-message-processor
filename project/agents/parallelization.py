@@ -8,9 +8,11 @@ You will add a third fraud detection agent and implement aggregation.
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any
 import time
+from config import Config
 from agents.workflow_agents.base_agents import (
     FraudAmountDetectionAgent,
     FraudPatternDetectionAgent,
+    GeographicRiskAgent,
     FraudAggAgent
 )
 
@@ -54,8 +56,11 @@ class ParallelizationPattern:
         self.list_of_agents = [
             FraudAmountDetectionAgent(),
             FraudPatternDetectionAgent(),
-            # Add your third agent here
+            GeographicRiskAgent()  # Third agent: geographic/corridor risk (LLM + rules)
         ]
+
+        # LLM-backed agents need more than the original 5s per result
+        self.result_timeout = Config.AGENT_TIMEOUT_SECONDS
 
     def _process_message(self, message: Dict, agent: Any) -> Dict:
         """
@@ -133,7 +138,7 @@ class ParallelizationPattern:
                 # Wait for all agents to complete for this message
                 for future in msg_data['futures']:
                     try:
-                        result = future.result(timeout=5)
+                        result = future.result(timeout=self.result_timeout)
                         agent_results.append(result)
                     except Exception as e:
                         print(f"Error getting result for message {msg_id}: {e}")

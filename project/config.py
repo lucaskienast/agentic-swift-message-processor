@@ -26,6 +26,8 @@ class Config:
     # Processing settings
     MAX_WORKERS = 8
     BATCH_SIZE = 50
+    # Max seconds to wait for one fraud agent's result (LLM calls can be slow)
+    AGENT_TIMEOUT_SECONDS = 60
 
     # OpenAI settings (read by services/llm_service.py; the key comes from .env)
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
