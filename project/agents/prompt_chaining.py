@@ -17,11 +17,34 @@ class PromptChainingPattern:
     Each agent adds your specialized analysis to build a comprehensive assessment.
     """
 
+    # Facts the earlier pipeline stages already established. Prepended to every
+    # agent's system prompt: without it, real runs showed gpt-4o calling every
+    # well-formed but unfamiliar BIC "invalid" and holding clean payments.
+    ESTABLISHED_FACTS = """ESTABLISHED FACTS - treat these as verified, do not contradict them:
+- Every message already passed deterministic SWIFT format validation
+  (Evaluator-Optimizer): BICs are 8 or 11 characters in the AAAA BB CC (DDD)
+  format, references are at most 16 characters, amounts and currencies are
+  valid. Do not report format, BIC or reference violations.
+- You have no BIC directory or KYC records, so you cannot check whether a bank
+  exists. A well-formed BIC you do not recognize is NOT invalid, fake or
+  suspicious. Missing information you cannot check is not a red flag.
+- fraud_status, fraud_score and fraud_reasons on each message come from the
+  parallel fraud detection agents. They are the evidence base: build on them.
+- A reason mentioning a "High-risk/sanctioned jurisdiction" is a confirmed
+  sanctions hit (sanctions risk: confirmed). Sanctions risk is confirmed ONLY
+  in that case; other red flags, however serious, do not make it confirmed.
+- A "Test/fake pattern detected in BIC" reason is a confirmed fraud red flag.
+- Clean payments should flow straight through: approve messages without a
+  concrete red flag, and only hold or reject with specific evidence.
+
+"""
+
     def __init__(self):
         """Initialize the prompt chaining pattern with OpenAI client."""
         self.config = Config()
-        self.client = OpenAI()
-        self.model = "gpt-4o"
+        # Key and model come from Config (loaded from project/.env)
+        self.client = OpenAI(api_key=self.config.OPENAI_API_KEY or None)
+        self.model = self.config.OPENAI_MODEL
         self.temperature = 0.1  # Low temperature for consistent analysis
 
     def _create_initial_screener_prompt(self, messages: List[Dict]) -> tuple:
@@ -214,6 +237,9 @@ class PromptChainingPattern:
         """
         Make a call to the LLM with the given prompts.
 
+        Every agent's system prompt is prefixed with ESTABLISHED_FACTS so all
+        stages of the chain share the same verified evidence base.
+
         Args:
             system_prompt: System role prompt
             user_prompt: User message prompt
@@ -225,7 +251,7 @@ class PromptChainingPattern:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": self.ESTABLISHED_FACTS + system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 response_format={"type": "json_object"},
