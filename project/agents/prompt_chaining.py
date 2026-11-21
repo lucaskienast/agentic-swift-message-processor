@@ -308,6 +308,10 @@ class PromptChainingPattern:
         # chain_results['compliance_review'] = compliance_results
 
         # YOUR CODE HERE - Implement Step 4: Compliance Officer
+        print("Step 4: Compliance Officer reviewing for regulatory issues...")
+        system_prompt, user_prompt = self._create_compliance_officer_prompt(messages, chain_results)
+        compliance_results = self._call_llm(system_prompt, user_prompt)
+        chain_results['compliance_review'] = compliance_results
 
         # Step 5: Final Reviewer (Provided)
         print("Step 5: Final Reviewer making decisions...")
