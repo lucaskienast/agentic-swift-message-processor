@@ -36,13 +36,34 @@ class SWIFTProcessingSystem:
         self.prompt_chaining_agent = PromptChainingPattern()
     
     def generate_swift_messages(self) -> List[Dict]:
-        """Generate SWIFT messages for testing"""
-        messages = self.swift_generator.generate_messages(
+        """
+        Generate SWIFT messages and convert them into pipeline dictionaries.
+
+        The generator returns pydantic SWIFTMessage objects, but every agent
+        pattern works on plain, JSON-serializable dicts, so each message is
+        converted with _to_pipeline_dict before entering the pipeline.
+        """
+        swift_messages = self.swift_generator.generate_messages(
             count=self.config.MESSAGE_COUNT,
             bank_count=self.config.BANK_COUNT
         )
-        return messages
-    
+        return [self._to_pipeline_dict(message) for message in swift_messages]
+
+    @staticmethod
+    def _to_pipeline_dict(message: SWIFTMessage) -> Dict:
+        """
+        Convert a SWIFTMessage model into the dict format the agents expect.
+
+        - mode="json" turns datetimes into ISO strings so the LLM-based
+          patterns can json.dumps() the messages into their prompts.
+        - The agents read the currency from the amount field
+          (e.g. "1234.56 USD"), so the currency code is appended to it.
+          The separate 'currency' field is kept for reporting.
+        """
+        data = message.model_dump(mode="json")
+        data["amount"] = f"{message.amount} {message.currency}"
+        return data
+
     def process_with_evaluator_optimizer(self, messages: List[Dict]) -> List[Dict]:
         """
         Step 1: Validate and correct SWIFT messages using Evaluator-Optimizer pattern
