@@ -272,6 +272,10 @@ class PromptChainingPattern:
         # chain_results['technical_analysis'] = technical_results
 
         # YOUR CODE HERE - Implement Step 2: Technical Analyst
+        print("Step 2: Technical Analyst reviewing messages...")
+        system_prompt, user_prompt = self._create_technical_analyst_prompt(messages, initial_results)
+        technical_results = self._call_llm(system_prompt, user_prompt)
+        chain_results['technical_analysis'] = technical_results
 
         # Step 3: Risk Assessor (Provided as example)
         print("Step 3: Risk Assessor evaluating patterns...")
