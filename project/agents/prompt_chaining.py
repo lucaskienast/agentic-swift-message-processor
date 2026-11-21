@@ -286,10 +286,7 @@ class PromptChainingPattern:
             messages: The messages under analysis (to measure coverage)
         """
         message_ids = {m.get('message_id') for m in messages}
-        covered = set()
-        for value in result.values():
-            if isinstance(value, list):
-                covered |= {e.get('message_id') for e in value if isinstance(e, dict)} & message_ids
+        covered = self._find_message_ids(result) & message_ids
         summary = next((result[k] for k in ("summary", "technical_summary", "compliance_summary",
                                             "batch_summary") if k in result), "")
         status = "error" if self._last_call["error"] else ("ok" if result else "empty")
@@ -306,6 +303,27 @@ class PromptChainingPattern:
         })
         print(f"  -> {status} in {self._last_call['seconds']}s, "
               f"covered {len(covered)}/{len(message_ids)} messages")
+
+    @classmethod
+    def _find_message_ids(cls, value: Any) -> set:
+        """
+        Collect every message_id in an agent's output, however deeply nested.
+
+        The scaffold's risk assessor has no fixed output schema, and real runs
+        nested its per-message entries under varying keys (e.g.
+        {"risk_analysis": {"messages": [...]}}), so coverage cannot rely on
+        a top-level list.
+        """
+        found = set()
+        if isinstance(value, dict):
+            if isinstance(value.get('message_id'), str):
+                found.add(value['message_id'])
+            for item in value.values():
+                found |= cls._find_message_ids(item)
+        elif isinstance(value, list):
+            for item in value:
+                found |= cls._find_message_ids(item)
+        return found
 
     @staticmethod
     def _print_chain_log(chain_log: List[Dict]) -> None:
